@@ -1,0 +1,134 @@
+package client;
+
+import java.io.IOException;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
+import java.net.SocketTimeoutException;
+import java.util.Scanner;
+import java.util.concurrent.ConcurrentHashMap;
+
+import model.FileDataResponseType;
+import model.FileListResponseType;
+import model.FileSizeResponseType;
+import model.RequestType;
+import model.ResponseType;
+import model.ResponseType.RESPONSE_TYPES;
+import client.loggerManager;
+
+public class dummyClient {
+    private ConcurrentHashMap<Integer, byte[]> byteMap; // ConcurrentHashMap<End byte, byte[]>
+
+    private final long PACKET_SIZE = 1000; // 1KB
+    private final long SSTHRESH = 128; // Slow Start Threshold
+    private long CWND; // Congestion Window
+    private long cursor;
+    private long endByte;
+
+    public dummyClient() {
+        this.byteMap = new ConcurrentHashMap<Integer, byte[]>();
+        this.CWND = 1; // Initial Congestion Window
+        this.cursor = 1;
+        this.endByte = 0; // Set to 0 for initialization
+    }
+
+    private void getFileList(String ip, int port) throws IOException {
+        InetAddress IPAddress = InetAddress.getByName(ip);
+        RequestType req = new RequestType(RequestType.REQUEST_TYPES.GET_FILE_LIST, 0, 0, 0, null);
+        byte[] sendData = req.toByteArray();
+        DatagramPacket sendPacket = new DatagramPacket(sendData, sendData.length, IPAddress, port);
+        DatagramSocket dsocket = new DatagramSocket();
+        dsocket.send(sendPacket);
+        byte[] receiveData = new byte[ResponseType.MAX_RESPONSE_SIZE];
+        DatagramPacket receivePacket = new DatagramPacket(receiveData, receiveData.length);
+        dsocket.receive(receivePacket);
+        FileListResponseType response = new FileListResponseType(receivePacket.getData());
+        loggerManager.getInstance(this.getClass()).debug(response.toString());
+    }
+
+    private long getFileSize(String ip, int port, int file_id) throws IOException {
+        InetAddress IPAddress = InetAddress.getByName(ip);
+        RequestType req = new RequestType(RequestType.REQUEST_TYPES.GET_FILE_SIZE, file_id, 0, 0, null);
+        byte[] sendData = req.toByteArray();
+        DatagramPacket sendPacket = new DatagramPacket(sendData, sendData.length, IPAddress, port);
+        DatagramSocket dsocket = new DatagramSocket();
+        dsocket.send(sendPacket);
+        byte[] receiveData = new byte[ResponseType.MAX_RESPONSE_SIZE];
+        DatagramPacket receivePacket = new DatagramPacket(receiveData, receiveData.length);
+        dsocket.receive(receivePacket);
+        FileSizeResponseType response = new FileSizeResponseType(receivePacket.getData());
+        loggerManager.getInstance(this.getClass()).debug(response.toString());
+        return response.getFileSize();
+    }
+
+    private void getFileData(String ip, int port, int file_id, long start, long end) throws IOException {
+        InetAddress IPAddress = InetAddress.getByName(ip);
+        RequestType req = new RequestType(RequestType.REQUEST_TYPES.GET_FILE_DATA, file_id, start, end, null);
+        byte[] sendData = req.toByteArray();
+        DatagramPacket sendPacket = new DatagramPacket(sendData, sendData.length, IPAddress, port);
+        DatagramSocket dsocket = new DatagramSocket();
+        dsocket.send(sendPacket);
+        byte[] receiveData = new byte[ResponseType.MAX_RESPONSE_SIZE];
+        long maxReceivedByte = -1;
+        dsocket.setSoTimeout(1500); // TODO: Make it dynamic
+
+        long cursor = start;
+        while (maxReceivedByte < end) {
+            DatagramPacket receivePacket = new DatagramPacket(receiveData, receiveData.length);
+
+            while (true) {
+                System.out.println("Sending packet from " + cursor + " to " + (cursor+PACKET_SIZE));
+                try {
+                    dsocket.receive(receivePacket);
+                    FileDataResponseType response = new FileDataResponseType(receivePacket.getData());
+                    cursor = response.getEnd_byte() + 1;
+                    if (response.getEnd_byte()>maxReceivedByte){
+                        maxReceivedByte=response.getEnd_byte();
+                    };
+                    break;
+                } catch (SocketTimeoutException e) {
+                    dsocket.send(sendPacket);
+                    System.out.println(e);
+                }
+                System.out.println("retrying");  
+            }
+        }
+    }
+
+    public static void main(String[] args) throws Exception {
+        if (args.length < 1) {
+            throw new IllegalArgumentException("ip:port is mandatory");
+        }
+
+        String[] adr1 = args[0].split(":");
+        String ip1 = adr1[0];
+        int port1 = Integer.valueOf(adr1[1]);
+
+        dummyClient inst = new dummyClient();
+        Scanner scanner = new Scanner(System.in);
+
+        inst.getFileList(ip1, port1);
+
+        System.out.println("Enter a file number: ");
+        int fileNumber = scanner.nextInt();
+        scanner.close();
+
+        long fileSizeBytes = inst.getFileSize(ip1, port1, fileNumber);
+        System.out.println("File size: " + fileSizeBytes + " bytes");
+
+        while (true) {
+            System.out.println("CWND: " + inst.CWND);
+            inst.endByte = inst.cursor + inst.CWND * inst.PACKET_SIZE;
+            inst.getFileData(ip1, port1, fileNumber, inst.cursor, inst.endByte);
+            inst.cursor = inst.endByte + 1;
+
+            if (inst.CWND < inst.SSTHRESH) {
+                inst.CWND *= 2;
+            } else {
+                inst.CWND += 1;
+            }
+        }
+
+        // inst.getFileData(ip1, port1, fileNumber,1, fileSizeBytes);
+    }
+}
